@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Diagnostics.HealthChecks;
+﻿using Elasticsearch.Net;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Nest;
 using System;
 using System.Collections.Concurrent;
@@ -18,26 +19,45 @@ namespace HealthChecks.Elasticsearch
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
         }
+
         public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default)
         {
             try
             {
-                if (!_connections.TryGetValue(_options.Uri, out ElasticClient lowLevelClient))
+                var connectionKey = _options.Uri ?? _options.CloudId;
+                if (!_connections.TryGetValue(connectionKey, out ElasticClient lowLevelClient))
                 {
-                    var settings = new ConnectionSettings(new Uri(_options.Uri));
+                    ConnectionSettings settings = new ConnectionSettings();
+                    if (!string.IsNullOrEmpty(_options.Uri))
+                    {
+                        settings = new ConnectionSettings(new Uri(_options.Uri));
+
+                        if (_options.AuthenticateWithBasicCredentials)
+                        {
+                            settings = settings.BasicAuthentication(_options.UserName, _options.Password);
+                        }
+                        else if (_options.AuthenticateWithCertificate)
+                        {
+                            settings = settings.ClientCertificate(_options.Certificate);
+                        }
+                    }
+                    else if (!string.IsNullOrEmpty(_options.CloudId))
+                    {
+                        if (_options.AuthenticateWithBasicCredentials)
+                        {
+                            var credentials = new BasicAuthenticationCredentials(_options.UserName, _options.Password);
+                            settings = new ConnectionSettings(new CloudConnectionPool(_options.CloudId, credentials));
+                        }
+                        else if (_options.AuthenticateWithApiKey)
+                        {
+                            var credentials = new ApiKeyAuthenticationCredentials(_options.ApiKey);
+                            settings = new ConnectionSettings(new CloudConnectionPool(_options.CloudId, credentials));
+                        }
+                    }
 
                     if (_options.RequestTimeout.HasValue)
                     {
                         settings = settings.RequestTimeout(_options.RequestTimeout.Value);
-                    }
-
-                    if (_options.AuthenticateWithBasicCredentials)
-                    {
-                        settings = settings.BasicAuthentication(_options.UserName, _options.Password);
-                    }
-                    else if (_options.AuthenticateWithCertificate)
-                    {
-                        settings = settings.ClientCertificate(_options.Certificate);
                     }
 
                     if (_options.CertificateValidationCallback != null)
@@ -46,10 +66,9 @@ namespace HealthChecks.Elasticsearch
                     }
 
                     lowLevelClient = new ElasticClient(settings);
-
-                    if (!_connections.TryAdd(_options.Uri, lowLevelClient))
+                    if (!_connections.TryAdd(connectionKey, lowLevelClient))
                     {
-                        lowLevelClient = _connections[_options.Uri];
+                        lowLevelClient = _connections[connectionKey];
                     }
                 }
 
